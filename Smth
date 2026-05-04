@@ -1,0 +1,211 @@
+scale = 32768;  % 2^15
+
+TI = int16([real(tx_analytic), (zeros(2048-length(tx_analytic),1))']*scale); TI(TI == 32768) = 32767;
+TQ = int16([imag(tx_analytic), (zeros(2048-length(tx_analytic),1))']*scale); TQ(TQ == 32768) = 32767;
+RI = int16([real(rx_analytic), (zeros(2048-length(rx_analytic),1))']*scale); RI(RI == 32768) = 32767;
+RQ = int16([imag(rx_analytic), (zeros(2048-length(rx_analytic),1))']*scale); RQ(RQ == 32768) = 32767;
+##figure;
+##subplot(2,1,1);
+##plot3(1:2048,TI,TQ);
+##subplot(2,1,2);
+##plot3(1:2048,RI,RQ);
+
+BITREV = bin2dec(fliplr(dec2bin(0:2048-1)));
+TIB = TI(BITREV+1);
+TQB = TQ(BITREV+1);
+RIB = RI(BITREV+1);
+RQB = RQ(BITREV+1);
+
+TWIDFACT = zeros(1024,1);
+for k = 0:(2048/2 - 1)
+    TWIDFACT(k+1) = exp(-2i * pi * k / 2048);
+end
+
+TWIDI = int16(real(TWIDFACT) * scale); TWIDI(TWIDI == 32768) = 32767;
+TWIDQ = int16(imag(TWIDFACT) * scale); TWIDQ(TWIDQ == 32768) = 32767;
+##figure;
+##plot3(1:1024,TWIDI,TWIDQ);
+
+% ----- Both signals already bit‑reversed and scaled -----
+% TIB, TQB = TX (bit‑reversed, Q1.15)
+% RIB, RQB = RX (bit‑reversed, Q1.15)
+
+N = 2048;
+% Copy to work arrays (int16)
+X1_re = bitshift(TIB, -0);   X1_im = bitshift(TQB, -0);
+X2_re = bitshift(RIB, -0);   X2_im = bitshift(RQB, -0);
+
+% ----- 11 stages of radix‑2 DIT FFT (corrected loop) -----
+for stage = 1:11
+    len = 2^stage;
+    half = len / 2;
+    tw_step = N / len;          % twiddle index increment
+
+    for base = 0:len:N-1        % <-- corrected: base steps by len, not block
+        for i = 0:half-1
+            p = base + i;
+            q = p + half;
+            tw = i * tw_step;    % twiddle index (0‑based)
+
+            % Load twiddle (int16 -> int32)
+            w_re = int32(TWIDI(tw+1));
+            w_im = int32(TWIDQ(tw+1));
+
+            % ----- Process TX signal -----
+            a1_re = int32(X1_re(p+1)); a1_im = int32(X1_im(p+1));
+            b1_re = int32(X1_re(q+1)); b1_im = int32(X1_im(q+1));
+            % Product: b1 * w with rounding (add 2^14 = 16384 before shift by 15)
+            prod1_re = bitshift(((b1_re * w_re) - (b1_im * w_im)) + 16384, -15);
+            prod1_im = bitshift(((b1_re * w_im) + (b1_im * w_re)) + 16384, -15);
+            % Butterfly with scaling by 0.5 (>>1)
+            new_a1_re = bitshift(a1_re + prod1_re, -1);
+            new_a1_im = bitshift(a1_im + prod1_im, -1);
+            new_b1_re = bitshift(a1_re - prod1_re, -1);
+            new_b1_im = bitshift(a1_im - prod1_im, -1);
+            X1_re(p+1) = int16(new_a1_re); X1_im(p+1) = int16(new_a1_im);
+            X1_re(q+1) = int16(new_b1_re); X1_im(q+1) = int16(new_b1_im);
+
+            % ----- Process RX signal (identical) -----
+            a2_re = int32(X2_re(p+1)); a2_im = int32(X2_im(p+1));
+            b2_re = int32(X2_re(q+1)); b2_im = int32(X2_im(q+1));
+            prod2_re = bitshift(((b2_re * w_re) - (b2_im * w_im)) + 16384, -15);
+            prod2_im = bitshift(((b2_re * w_im) + (b2_im * w_re)) + 16384, -15);
+            new_a2_re = bitshift(a2_re + prod2_re, -1);
+            new_a2_im = bitshift(a2_im + prod2_im, -1);
+            new_b2_re = bitshift(a2_re - prod2_re, -1);
+            new_b2_im = bitshift(a2_im - prod2_im, -1);
+            X2_re(p+1) = int16(new_a2_re); X2_im(p+1) = int16(new_a2_im);
+            X2_re(q+1) = int16(new_b2_re); X2_im(q+1) = int16(new_b2_im);
+        end
+    end
+end
+
+% After the loops:
+% X1_re, X1_im = FFT of TX (normal order)
+% X2_re, X2_im = FFT of RX (normal order)
+
+##figure;
+##subplot(2,1,1);
+##plot3(1:2048,fft(tx_analytic,2048));
+##subplot(2,1,2);
+##plot3(1:2048,fft(rx_analytic,2048));
+##
+##figure;
+##subplot(2,1,1);
+##plot3(1:2048,X1_re,X1_im);
+##subplot(2,1,2);
+##plot3(1:2048,X2_re,X2_im);
+##
+##customTF = (double(X1_re) + 1i*double(X1_im)) / 16;
+##customRF = (double(X2_re) + 1i*double(X2_im)) / 16;
+##
+##diffT = customTF - fft(tx_analytic, 2048);
+##diffR = customRF - fft(rx_analytic, 2048);
+##max(abs(diffT))
+##max(abs(diffR))
+
+% --------------------------------------------------------------
+% Frequency‑domain product: conj(TX) * RX
+% --------------------------------------------------------------
+TIF = int32(bitshift(X1_re,-4));
+TQF = -int32(bitshift(X1_im,-4));
+RIF = int32(bitshift(X2_re,-4));
+RQF = int32(bitshift(X2_im,-4));
+
+##customTF = (double(TIF) + 1i*double(TQF));
+##customRF = (double(RIF) + 1i*double(RQF));
+##
+##diffT = customTF - fft(tx_analytic, 2048);
+##diffR = customRF - fft(rx_analytic, 2048);
+##max(abs(diffT))
+##max(abs(diffR))
+##
+##
+##figure;
+##subplot(2,1,1);
+##plot3(1:2048,fft(tx_analytic,2048));
+##subplot(2,1,2);
+##plot3(1:2048,fft(rx_analytic,2048));
+##
+##figure;
+##subplot(2,1,1);
+##plot3(1:2048,TIF,TQF);
+##subplot(2,1,2);
+##plot3(1:2048,RIF,RQF);
+
+PRESI = int16(bitshift((TIF .* RIF) - (TQF .* RQF), 0));
+PRESQ = int16(bitshift((TIF .* RQF) + (TQF .* RIF), 0));
+% Optionally store as int16:
+
+
+##PRESI = int16(bitshift(real_sum + 16384, -15));
+##PRESQ = int16(bitshift(imag_sum + 16384, -15));
+
+customTF = (double(PRESI) + 1i*double(PRESQ));
+inbui = conj(fft(tx_analytic,2048)) .* fft(rx_analytic,2048);
+max(abs(inbui))
+max(abs(customTF))
+##
+##diff_abs = abs(inbui - customTF);
+##max_diff = max(diff_abs)
+##figure;
+##subplot(2,1,1);
+##plot3(1:2048,customTF);
+##subplot(2,1,2);
+##plot3(1:2048,inbui);
+
+
+
+% Bit‑reverse the product for IFFT input (correct order)
+RESIB = PRESI(BITREV+1);
+RESQB = PRESQ(BITREV+1);
+
+% --------------------------------------------------------------
+% IFFT using conjugated twiddles
+% --------------------------------------------------------------
+Y_re = int16(bitshift(RESIB,0));
+Y_im = int16(bitshift(RESQB,0));
+
+for stage = 1:11
+    len = 2^stage;
+    half = len / 2;
+    tw_step = N / len;
+    for base = 0:len:N-1
+        for i = 0:half-1
+            p = base + i;
+            q = p + half;
+            tw = i * tw_step;
+            w_re = int32(TWIDI(tw+1));
+            w_im = -int32(TWIDQ(tw+1));   % conjugate for IFFT
+
+            a_re = int32(Y_re(p+1)); a_im = int32(Y_im(p+1));
+            b_re = int32(Y_re(q+1)); b_im = int32(Y_im(q+1));
+
+            prod_re = bitshift(((b_re * w_re) - (b_im * w_im)) + 16384, -15);  % fixed: -15
+            prod_im = bitshift(((b_re * w_im) + (b_im * w_re)) + 16384, -15);
+
+            new_a_re = bitshift(a_re + prod_re, -1);
+            new_a_im = bitshift(a_im + prod_im, -1);
+            new_b_re = bitshift(a_re - prod_re, -1);
+            new_b_im = bitshift(a_im - prod_im, -1);
+
+            Y_re(p+1) = int16(new_a_re);
+            Y_im(p+1) = int16(new_a_im);
+            Y_re(q+1) = int16(new_b_re);
+            Y_im(q+1) = int16(new_b_im);
+        end
+    end
+end
+
+% Circular shift
+FRESTI = circshift(Y_re, length(tx_analytic));
+FRESTQ = circshift(Y_im, length(tx_analytic));
+
+% Plot as float for proper comparison
+figure;
+subplot(2,1,1);
+plot(real(double(FRESTI) + 1i*double(FRESTQ)) / 32768);
+title('Custom matched filter');
+subplot(2,1,2);
+plot(real(res2));
+title('Built‑in ifft');
